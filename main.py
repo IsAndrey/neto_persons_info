@@ -1,16 +1,18 @@
 import os
+import sys
 import psycopg2
 import logging
 from psycopg2 import  Error
 from dotenv import load_dotenv
-from logging import INFO
+from logging import DEBUG
+from example_data import ADD_PERSONS, FIND_PERSONS, DELETE_PERSONS
 
 
 load_dotenv()
 logging.basicConfig(
     format='%(asctime)s [%(levelname)s] >> %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S',
-    level=INFO
+    level=DEBUG
 )
 logger = logging.getLogger(__name__)
 
@@ -24,11 +26,7 @@ def create_db(conn):
             email varchar(50) NOT NULL
         );
     '''
-    query_create_index = '''
-        CREATE UNIQUE INDEX IF NOT EXISTS check_email ON persons (
-            LOWER (email)
-        );
-    '''
+
     query_create_phones = '''
         CREATE TABLE IF NOT EXISTS phones (
             id_phone serial PRIMARY KEY,
@@ -37,20 +35,43 @@ def create_db(conn):
             CONSTRAINT fk_person FOREIGN KEY (id_person) references persons(id_person) ON DELETE cascade 
         );
     '''
+    if conn.server_version >= 90500:
+        substr = 'IF NOT EXISTS'
+    else:
+        substr = ''
+    query_create_index = f'''
+            CREATE UNIQUE INDEX {substr} check_email ON persons (
+                LOWER (email)
+            );
+        '''
+
     try:
-        logger.debug('Создание таблицы persons')
-        conn.execute(query_create_persons)
-        logger.debug('Создание индекса')
-        conn.execute(query_create_index)
-        logger.debug('Создание таблицы phones')
-        conn.execute(query_create_phones)
+        with conn.cursor() as cur:
+            logger.debug('Создание таблицы persons')
+            cur.execute(query_create_persons)
+            logger.debug('Создание таблицы phones')
+            cur.execute(query_create_phones)
+            logger.debug('Создание индекса')
+            cur.execute(query_create_index)
+        logger.debug('Фиксация изменений')
+        conn.commit()
     except psycopg2.Error as e:
         logger.error(e.diag.message_primary)
 
     logger.info('База данных успешно создана.')
 
 def add_client(conn, first_name, last_name, email, phones=None):
-    pass
+    query_add_person = f'''
+        INSERT INTO persons (first_name, second_name, email) VALUES 
+        ({first_name}, {last_name}, {email});
+    '''
+    try:
+        with conn.cursor() as cur:
+            logger.debug(f'Добавление клиента {first_name} {last_name} {email}')
+            id_person = cur.execute(query_add_person)
+            logger.debug(f'id {id_person}')
+    except psycopg2.Error as e:
+        logger.error(e.diag.message_primary)
 
 def add_phone(conn, client_id, phone):
     pass
@@ -75,8 +96,16 @@ if __name__=='__main__':
     logger.debug('Подключение к базе данных')
     try:
         with psycopg2.connect(dbname=dbname, user=user, password=password) as conn:
+            logger.debug(f'Postgresql версия {conn.server_version}')
             create_db(conn)
+            for person in ADD_PERSONS:
+                add_client(conn, **person)
+                break
+            sys.exit()
+            for person in FIND_PERSONS:
+                find_client(conn, **person)
+            for person in DELETE_PERSONS:
+                delete_client(conn, **person)
+
     except (Exception, Error) as e:
         logger.error(e)
-
-
