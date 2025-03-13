@@ -61,8 +61,8 @@ def create_db(conn):
             cur.execute(query_create_index)
         logger.debug('Фиксация изменений')
         conn.commit()
-    except psycopg2.Error as e:
-        logger.error(e.diag.message_primary)
+    except psycopg2.Error as e_postgres:
+        logger.error(e_postgres.diag.message_primary)
 
     logger.info('База данных успешно создана.')
 
@@ -88,34 +88,46 @@ def add_client(conn, first_name, last_name, email, phones=None):
             cur.execute(query_add_person, query_params)
             id_person = cur.fetchone()
             logger.debug(f'Получен id {id_person}')
-            if phones is not None and (isinstance(phones, list) or isinstance(phones, tuple)):
+            if phones is not None:
                 query_phones_params = [{'id_person': id_person, 'phone': phone} for phone in phones]
                 cur.executemany(query_add_phones, query_phones_params)
         logger.debug('Фиксация изменений')
         conn.commit()
-    except psycopg2.Error as e:
-        logger.error(e.diag.message_primary)
+    except psycopg2.Error as e_postgres:
+        logger.error(e_postgres.diag.message_primary)
+        return None
+    except Exception as e:
+        logger.error(e)
+        return None
     logger.info('Данные успешно добавлены в базу.')
+    return id_person
 
-def add_phone(conn, client_id, phone):
+def add_phone(conn, client_id, phone='', many=False, phones=None):
     """Функция, позволяющая добавить телефон для существующего клиента."""
     query_add_phone = '''
         INSERT INTO phones (id_person, phone_number)
-        VALUES (%(id_person)s, %(phone)s);
+        VALUES (%(id_person)s, %(phone)s)
+        RETURNING *
     '''
     query_params = {
         'id_person': client_id,
         'phone': phone
     }
+
     try:
         with conn.cursor() as cur:
-            logger.info(f'Добавление телефона {phone} для клиента {client_id}')
-            cur.execute(query_add_phone, query_params)
+            if many:
+                query_params_many = [{'id_person': client_id, 'phone': phone} for phone in phones]
+                logger.info(f'Добавление телефонов {phones} для клиента {client_id}')
+                cur.executemany(query_add_phone, query_params_many)
+            else:
+                logger.info(f'Добавление телефона {phone} для клиента {client_id}')
+                cur.execute(query_add_phone, query_params)
         logger.debug('Фиксация изменений')
         conn.commit()
-    except psycopg2.Error as e:
-        logger.error(e.diag.message_primary)
-        return
+    except psycopg2.Error as e_postgres:
+        logger.error(e_postgres.diag.message_primary)
+        return None
     logger.info('Данные успешно добавлены в базу.')
 
 def change_client(conn, client_id, first_name=None, last_name=None, email=None, phones=None,
@@ -124,21 +136,33 @@ def change_client(conn, client_id, first_name=None, last_name=None, email=None, 
     query_fields = ''
     query_values = ''
     change_query_params = {}
-    if first_name is not None and isinstance(first_name, str):
+    for key, val in {
+        'first_name': first_name,
+        'last_name': last_name,
+        'email': email
+    }.items():
+        if val is not None:
+            query_fields += f', {key}'
+            query_values += f', %({key})s'
+            change_query_params[key] = val
+            logger.debug(f'Установлено поле для изменения {key} значение {val}')
+    '''
+    if first_name is not None:
         query_fields += ', first_name'
         query_values += ', %(first_name)s'
         change_query_params['first_name'] = first_name
         logger.debug(f'Установлено поле для изменения first_name значение {first_name}')
-    if last_name is not None and isinstance(last_name, str):
+    if last_name is not None:
         query_fields += ', last_name'
         query_values += ', %(last_name)s'
         change_query_params['last_name'] = last_name
         logger.debug(f'Установлено поле для изменения last_name значение {last_name}')
-    if email is not None and isinstance(email, str):
+    if email is not None:
         query_fields += ', email'
         query_values += ', %(email)s'
         change_query_params['email'] = email
         logger.debug(f'Установлено поле для изменения email значение {email}')
+    '''
     if query_fields != '' and query_fields != '':
         query_fields = query_fields[2:]
         query_values = query_values[2:]
@@ -157,10 +181,9 @@ def change_client(conn, client_id, first_name=None, last_name=None, email=None, 
             DELETE FROM phones WHERE id_person = %(id_person)i;
         '''
     else:
-        delete_current_phones = None
         delete_query_params = None
 
-    if phones is not None and (isinstance(phones, list) or isinstance(phones, tuple)):
+    if phones is not None:
         ...
 
     with conn.cursor() as cur:
@@ -218,8 +241,8 @@ def find_client(conn, first_name=None, last_name=None, email=None, phone=None, g
                 logger.debug(f'Получен id клиента {result}')
             else:
                 result = None
-    except psycopg2.Error as e:
-        logger.error(e.diag.message_primary)
+    except psycopg2.Error as e_postgres:
+        logger.error(e_postgres.diag.message_primary)
         return None
     
     if result is not None:
