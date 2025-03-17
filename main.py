@@ -46,10 +46,10 @@ def create_db(conn):
     else:
         substr = ''
     query_create_index = f'''
-            CREATE UNIQUE INDEX {substr} check_email ON persons (
-                LOWER (email)
-            );
-        '''
+        CREATE UNIQUE INDEX {substr} check_email ON persons (
+            LOWER (email)
+        );
+    '''
 
     try:
         with conn.cursor() as cur:
@@ -264,12 +264,6 @@ if __name__=='__main__':
             create_db(conn)
             for person in ADD_PERSONS:
                 add_client(conn, **person)
-                break
-            sys.exit()
-            for person in FIND_PERSONS:
-                find_client(conn, **person)
-            for person in DELETE_PERSONS:
-                delete_client(conn, **person)
 
     except (Exception, Error) as e:
         logger.error(e)
