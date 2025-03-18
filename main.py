@@ -1,5 +1,4 @@
 import os
-import sys
 import psycopg2
 import logging
 from psycopg2 import Error
@@ -25,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 def create_db(conn):
     """Функция, создающая структуру БД (таблицы)."""
+    conn.autocommit = False
     query_create_persons = '''
         CREATE TABLE IF NOT EXISTS persons (
             id_person serial PRIMARY KEY,
@@ -57,17 +57,32 @@ def create_db(conn):
             cur.execute(query_create_persons)
             logger.debug('Создание таблицы phones')
             cur.execute(query_create_phones)
+    except psycopg2.Error as e_postgres:
+        logger.error(f'Код ошибки {e_postgres.pgcode} {e_postgres.diag.message_primary}')
+        logger.debug('Отмена изменений')
+        conn.rollback()
+        return False
+
+    try:
+        with conn.cursor() as cur:
             logger.debug('Создание индекса')
             cur.execute(query_create_index)
-        logger.debug('Фиксация изменений')
-        conn.commit()
+    except psycopg2.errors.DuplicateTable as e_postgres:
+        logger.debug(f'Код ошибки {e_postgres.pgcode} {e_postgres.diag.message_primary}')
     except psycopg2.Error as e_postgres:
-        logger.error(e_postgres.diag.message_primary)
+        logger.error(f'Код ошибки {e_postgres.pgcode} {e_postgres.diag.message_primary}')
+        logger.debug('Отмена изменений')
+        conn.rollback()
+        return False
 
+    logger.debug('Фиксация изменений')
+    conn.commit()
     logger.info('База данных успешно создана.')
+    return True
 
 def add_client(conn, first_name, last_name, email, phones=None):
     """Функция, позволяющая добавить нового клиента."""
+    conn.autocommit = False
     query_add_person = '''
         INSERT INTO persons (first_name, second_name, email) VALUES 
         (%(first_name)s, %(last_name)s, %(email)s)
@@ -86,19 +101,24 @@ def add_client(conn, first_name, last_name, email, phones=None):
         with conn.cursor() as cur:
             logger.info(f'Добавление клиента {first_name} {last_name} {email}')
             cur.execute(query_add_person, query_params)
-            id_person = cur.fetchone()
+            id_person = cur.fetchone()[0]
             logger.debug(f'Получен id {id_person}')
             if phones is not None:
                 query_phones_params = [{'id_person': id_person, 'phone': phone} for phone in phones]
+                logger.info(f'Добавление телефонов {",".join(phones)}')
                 cur.executemany(query_add_phones, query_phones_params)
-        logger.debug('Фиксация изменений')
-        conn.commit()
     except psycopg2.Error as e_postgres:
-        logger.error(e_postgres.diag.message_primary)
+        logger.error(f'Код ошибки {e_postgres.pgcode} {e_postgres.diag.message_primary}')
+        logger.debug('Отмена изменений')
+        conn.rollback()
         return None
     except Exception as e:
         logger.error(e)
+        logger.debug('Отмена изменений')
+        conn.rollback()
         return None
+    logger.debug('Фиксация изменений')
+    conn.commit()
     logger.info('Данные успешно добавлены в базу.')
     return id_person
 
@@ -118,7 +138,7 @@ def add_phone(conn, client_id, phone='', many=False, phones=None):
         with conn.cursor() as cur:
             if many:
                 query_params_many = [{'id_person': client_id, 'phone': phone} for phone in phones]
-                logger.info(f'Добавление телефонов {phones} для клиента {client_id}')
+                logger.info(f'Добавление телефонов {",".join(phones)} для клиента {client_id}')
                 cur.executemany(query_add_phone, query_params_many)
             else:
                 logger.info(f'Добавление телефона {phone} для клиента {client_id}')
@@ -127,8 +147,9 @@ def add_phone(conn, client_id, phone='', many=False, phones=None):
         conn.commit()
     except psycopg2.Error as e_postgres:
         logger.error(e_postgres.diag.message_primary)
-        return None
+        return False
     logger.info('Данные успешно добавлены в базу.')
+    return True
 
 def change_client(conn, client_id, first_name=None, last_name=None, email=None, phones=None,
                   delete_current_phones=False):
@@ -200,29 +221,45 @@ def delete_client(conn, client_id):
 
 def find_client(conn, first_name=None, last_name=None, email=None, phone=None, get_many=False, limit=10):
     """Функция, позволяющая найти клиента по его данным: имени, фамилии, email или телефону."""
+    def p(word, q):
+        # значение значения, значений
+        if str(q)[-1] == '1':
+            return word[0:-1] + 'е'
+        elif str(q)[-1] in ('2', '3', '4'):
+            return word[0:-1] + 'я'
+        else:
+            return word
+
+    conn.autocommit = True
     search_conditions = ''
     query_params = {}
-    if first_name is not None and isinstance(first_name, str):
+    if first_name is not None:
         search_conditions += 'AND p.first_name = %(first_name)s '
         query_params['first_name'] = first_name
         logger.debug(f'Установлен параметр поиска first_name {first_name}')
-    if last_name is not None and isinstance(last_name, str):
-        search_conditions += 'AND p.last_name = %(last_name)s '
+    if last_name is not None:
+        search_conditions += 'AND p.second_name = %(last_name)s '
         query_params['last_name'] = last_name
         logger.debug(f'Установлен параметр поиска last_name {last_name}')
-    if email is not None and isinstance(email, str):
+    if email is not None:
         search_conditions += 'AND p.email = %(email)s '
         query_params['email'] = email
         logger.debug(f'Установлен параметр поиска email {email}')
-    if phone is not None and isinstance(phone, str):
-        search_conditions += 'OR  ph.phone = %(phone)s '
+    if search_conditions != '':
+        search_conditions = search_conditions[4:-1]  #Убираем ненужный AND
+    if phone is not None and search_conditions != '':
+        search_conditions = f'WHERE ({search_conditions}) OR ph.phone_number = %(phone)s'
         query_params['phone'] = phone
         logger.debug(f'Установлен параметр поиска phone {phone}')
-    if search_conditions != '':
-        search_conditions = 'WHERE ' + search_conditions[4:-1]
+    elif phone is not None and search_conditions == '':
+        search_conditions = f'WHERE ph.phone_number = %(phone)s '
+        query_params['phone'] = phone
+        logger.debug(f'Установлен параметр поиска phone {phone}')
+    elif search_conditions != '':
+        search_conditions = f'WHERE {search_conditions}'
 
     find_person_query = f'''
-        SELECT DISTINCT id_person FROM persons p 
+        SELECT DISTINCT p.id_person FROM persons p 
         LEFT JOIN phones ph
         ON p.id_person = ph.id_person
         {search_conditions};
@@ -230,26 +267,28 @@ def find_client(conn, first_name=None, last_name=None, email=None, phone=None, g
 
     try:
         with conn.cursor() as cur:
-            logger.info(f'Поиск клиента')
-            cur.execute(find_person_query)
-            logger.debug(f'Найдено {cur.rowcount} значений')
+            logger.info(f'Поиск клиента {",".join([f"{key}={val}" for key, val in query_params.items()])}')
+            cur.execute(find_person_query, query_params)
+            logger.debug(f'Найдено {cur.rowcount} {p("значений", cur.rowcount)}')
             if get_many and cur.rowcount > 0:
                 result = cur.fetchmany(limit)
-                logger.debug(f'Получены id клиентов {result}')
+                logger.debug(f'Получены id клиентов {",".join([str(id[0]) for id in result])}')
             elif cur.rowcount == 1:
                 result = cur.fetchone()
-                logger.debug(f'Получен id клиента {result}')
+                logger.debug(f'Получен id клиента {result[0]}')
             else:
                 result = None
     except psycopg2.Error as e_postgres:
-        logger.error(e_postgres.diag.message_primary)
-        return None
+        logger.error(f'Код ошибки {e_postgres.pgcode} {e_postgres.diag.message_primary}')
+        result = None
+    except Exception as e:
+        logger.error(e)
+        result = None
     
     if result is not None:
         logger.info('Поиск успешно завершен')
     else:
         logger.info('Поиск не дал результатов')
-
     return result
 
 
@@ -260,10 +299,15 @@ if __name__=='__main__':
     logger.debug('Подключение к базе данных')
     try:
         with psycopg2.connect(dbname=dbname, user=user, password=password) as conn:
-            logger.debug(f'Postgresql версия {conn.server_version}')
+            print(conn.autocommit)
+            logger.debug(f'Postgreesql версия {conn.server_version}')
+            '''
             create_db(conn)
             for person in ADD_PERSONS:
                 add_client(conn, **person)
+            '''
+            for person in FIND_PERSONS:
+                find_client(conn, **person)
 
     except (Exception, Error) as e:
         logger.error(e)
